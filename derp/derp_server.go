@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/big"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -133,6 +134,7 @@ type Server struct {
 	logf        logger.Logf
 	memSys0     uint64 // runtime.MemStats.Sys at start (or early-ish)
 	meshKey     string
+	meshPort    string
 	limitedLogf logger.Logf
 	metaCert    []byte // the encoded x509 cert to send after LetsEncrypt cert+intermediate
 	dupPolicy   dupPolicy
@@ -501,6 +503,10 @@ func (s *Server) SetTailscaledSocketPath(path string) {
 // Defaults to 2 seconds.
 func (s *Server) SetTCPWriteTimeout(d time.Duration) {
 	s.tcpWriteTimeout = d
+}
+
+func (s *Server) SetMeshPort(port string) {
+	s.meshPort = port
 }
 
 // HasMeshKey reports whether the server is configured with a mesh key.
@@ -900,6 +906,8 @@ func (s *Server) accept(ctx context.Context, nc Conn, brw *bufio.ReadWriter, rem
 		return fmt.Errorf("receive client key: %v", err)
 	}
 
+	_, localPort, _ := net.SplitHostPort(nc.LocalAddr().String())
+
 	remoteIPPort, _ := netip.ParseAddrPort(remoteAddr)
 	if err := s.verifyClient(ctx, clientKey, clientInfo, remoteIPPort.Addr()); err != nil {
 		return fmt.Errorf("client %v rejected: %v", clientKey, err)
@@ -926,7 +934,7 @@ func (s *Server) accept(ctx context.Context, nc Conn, brw *bufio.ReadWriter, rem
 		discoSendQueue: make(chan pkt, s.perClientSendQueueDepth),
 		sendPongCh:     make(chan [8]byte, 1),
 		peerGone:       make(chan peerGoneMsg),
-		canMesh:        s.isMeshPeer(clientInfo),
+		canMesh:        s.hasMeshPSK(clientInfo) && s.usingMeshPort(localPort),
 		isNotIdealConn: IdealNodeContextKey.Value(ctx) != "",
 		peerGoneLim:    rate.NewLimiter(rate.Every(time.Second), 3),
 	}
@@ -1331,16 +1339,26 @@ func (c *sclient) requestMeshUpdate() {
 	}
 }
 
-// isMeshPeer reports whether the client is a trusted mesh peer
-// node in the DERP region.
-func (s *Server) isMeshPeer(info *clientInfo) bool {
+// hasMeshPSK reports whether the client provides
+// a matching pre-shared key and can be trusted.
+func (s *Server) hasMeshPSK(info *clientInfo) bool {
 	return info != nil && info.MeshKey != "" && info.MeshKey == s.meshKey
+}
+
+// usingMeshPort reports if the given port is
+// authorized for mesh connections.
+func (s *Server) usingMeshPort(port string) bool {
+	if s.meshPort == "" {
+		return true
+	}
+
+	return s.meshPort == port
 }
 
 // verifyClient checks whether the client is allowed to connect to the derper,
 // depending on how & whether the server's been configured to verify.
 func (s *Server) verifyClient(ctx context.Context, clientKey key.NodePublic, info *clientInfo, clientIP netip.Addr) error {
-	if s.isMeshPeer(info) {
+	if s.hasMeshPSK(info) {
 		// Trusted mesh peer. No need to verify further. In fact, verifying
 		// further wouldn't work: it's not part of the tailnet so tailscaled and
 		// likely the admission control URL wouldn't know about it.
