@@ -291,6 +291,7 @@ func (d *derpProber) probeMesh(from, to string) ProbeClass {
 			}
 
 			dm := d.lastDERPMap
+			fromN.DERPPort = 8888
 			return derpProbeNodePair(ctx, dm, fromN, toN, d.meshKey)
 		},
 		Class:  "derp_mesh",
@@ -720,12 +721,12 @@ func derpProbeBandwidth(ctx context.Context, dm *tailcfg.DERPMap, from, to *tail
 // derpProbeNodePair sends a small packet between two local DERP clients
 // connected to two DERP servers.
 func derpProbeNodePair(ctx context.Context, dm *tailcfg.DERPMap, from, to *tailcfg.DERPNode, meshKey string) (err error) {
-	fromc, err := newConn(ctx, dm, from, true, meshKey)
+	fromc, err := newConn(ctx, dm, from, !to.InsecureForTests, meshKey)
 	if err != nil {
 		return err
 	}
 	defer fromc.Close()
-	toc, err := newConn(ctx, dm, to, true, meshKey)
+	toc, err := newConn(ctx, dm, to, !from.InsecureForTests, meshKey)
 	if err != nil {
 		return err
 	}

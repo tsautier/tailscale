@@ -992,6 +992,7 @@ func (c *sclient) run(ctx context.Context) error {
 
 	c.startStatsLoop(sendCtx)
 
+	fmt.Printf("Mike %s : %v\n", c.nc.LocalAddr().String(), c.canMesh)
 	for {
 		ft, fl, err := readFrameHeader(c.br)
 		c.debugLogf("read frame type %d len %d err %v", ft, fl, err)
@@ -1007,6 +1008,8 @@ func (c *sclient) run(ctx context.Context) error {
 			return fmt.Errorf("client %s: readFrameHeader: %w", c.key.ShortString(), err)
 		}
 		c.s.noteClientActivity(c)
+
+		fmt.Printf("0x%X\n", ft)
 		switch ft {
 		case frameNotePreferred:
 			err = c.handleFrameNotePreferred(ft, fl)
@@ -1162,6 +1165,9 @@ func (c *sclient) handleFrameForwardPacket(ft frameType, fl uint32) error {
 
 // handleFrameSendPacket reads a "send packet" frame from the client.
 func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
+	if !c.canMesh {
+		return fmt.Errorf("insufficient permissions")
+	}
 	s := c.s
 
 	dstKey, contents, err := s.recvPacket(c.br, fl)
@@ -1351,6 +1357,8 @@ func (s *Server) usingMeshPort(port string) bool {
 	if s.meshPort == "" {
 		return true
 	}
+
+	fmt.Printf("Mike %s/%s\n", s.meshPort, port)
 
 	return s.meshPort == port
 }
