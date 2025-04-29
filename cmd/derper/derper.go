@@ -510,7 +510,9 @@ func rateLimitedListenAndServeTLS(srv *http.Server, lc *net.ListenConfig) error 
 		return err
 	}
 	rln := newRateLimitedListener(ln, rate.Limit(*acceptConnLimit), *acceptConnBurst)
-	expvar.Publish("tls_listener", rln.ExpVar())
+	if expvar.Get("tls_listener") == nil {
+		expvar.Publish("tls_listener", rln.ExpVar())
+	}
 	defer rln.Close()
 	return srv.ServeTLS(rln, "", "")
 }

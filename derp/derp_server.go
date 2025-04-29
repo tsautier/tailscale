@@ -1162,6 +1162,9 @@ func (c *sclient) handleFrameForwardPacket(ft frameType, fl uint32) error {
 
 // handleFrameSendPacket reads a "send packet" frame from the client.
 func (c *sclient) handleFrameSendPacket(ft frameType, fl uint32) error {
+	if !c.canMesh {
+		return fmt.Errorf("insufficient permissions")
+	}
 	s := c.s
 
 	dstKey, contents, err := s.recvPacket(c.br, fl)
