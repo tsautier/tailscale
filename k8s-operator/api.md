@@ -342,6 +342,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mode` _[APIServerProxyMode](#apiserverproxymode)_ | Mode to run the API server proxy in. Supported modes are auth and noauth.<br />In auth mode, requests from the tailnet proxied over to the Kubernetes<br />API server are additionally impersonated using the sender's tailnet identity.<br />If not specified, defaults to auth mode. |  | Enum: [auth noauth] <br />Type: string <br /> |
+| `serviceName` _string_ | ServiceName is the name of the Tailscale Service to create.<br />If not specified, a name will be generated based on the ProxyGroup name. |  |  |
+| `serviceTags` _[Tags](#tags)_ | ServiceTags are the tags to apply to the Tailscale Service.<br />These tags control which users in your tailnet can access the service.<br />If not specified, the ProxyGroup's Tags will be used.<br />Tag values must be in form ^tag:[a-zA-Z][a-zA-Z0-9-]*$. |  | Pattern: `^tag:[a-zA-Z][a-zA-Z0-9-]*$` <br />Type: string <br /> |
 
 
 #### LabelValue
@@ -1081,6 +1083,7 @@ _Validation:_
 
 _Appears in:_
 - [ConnectorSpec](#connectorspec)
+- [KubeAPIServerConfig](#kubeapiserverconfig)
 - [ProxyGroupSpec](#proxygroupspec)
 - [RecorderSpec](#recorderspec)
 

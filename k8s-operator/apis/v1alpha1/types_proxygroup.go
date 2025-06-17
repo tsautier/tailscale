@@ -157,4 +157,16 @@ type KubeAPIServerConfig struct {
 	// If not specified, defaults to auth mode.
 	// +optional
 	Mode *APIServerProxyMode `json:"mode,omitempty"`
+
+	// ServiceName is the name of the Tailscale Service to create.
+	// If not specified, a name will be generated based on the ProxyGroup name.
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+
+	// ServiceTags are the tags to apply to the Tailscale Service.
+	// These tags control which users in your tailnet can access the service.
+	// If not specified, the ProxyGroup's Tags will be used.
+	// Tag values must be in form ^tag:[a-zA-Z][a-zA-Z0-9-]*$.
+	// +optional
+	ServiceTags Tags `json:"serviceTags,omitempty"`
 }

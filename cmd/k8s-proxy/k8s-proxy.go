@@ -28,6 +28,7 @@ import (
 	apiproxy "tailscale.com/k8s-operator/api-proxy"
 	"tailscale.com/kube/k8s-proxy/conf"
 	"tailscale.com/kube/state"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -106,15 +107,15 @@ func run(logger *zap.SugaredLogger) error {
 		return fmt.Errorf("error starting tailscale server: %w", err)
 	}
 	defer ts.Close()
+	lc, err := ts.LocalClient()
+	if err != nil {
+		return fmt.Errorf("error getting local client: %w", err)
+	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
 
 	// Setup for updating state keys.
 	if podUID != "" {
-		lc, err := ts.LocalClient()
-		if err != nil {
-			return fmt.Errorf("error getting local client: %w", err)
-		}
 		w, err := lc.WatchIPNBus(groupCtx, ipn.NotifyInitialNetMap)
 		if err != nil {
 			return fmt.Errorf("error watching IPN bus: %w", err)
@@ -130,6 +131,76 @@ func run(logger *zap.SugaredLogger) error {
 		})
 	}
 
+	// Determine if we need to provision certificates for a Tailscale Service
+	shouldProvisionCerts := false
+	if cfg.Parsed.KubeAPIServer != nil &&
+		cfg.Parsed.KubeAPIServer.TailscaleService != nil &&
+		cfg.Parsed.KubeAPIServer.TailscaleService.DoProvisioning {
+		shouldProvisionCerts = true
+		logger.Infof("This pod will provision certificates for Tailscale Service: %s",
+			cfg.Parsed.KubeAPIServer.TailscaleService.Name)
+	}
+
+	// If we're provisioning certs, make sure we request the cert
+	if shouldProvisionCerts {
+		// Set up the server to request certificates
+		ts.Logf("This pod will provision certificates")
+		// Note: The tsnet.Server currently doesn't have a CertDomains field,
+		// but the underlying tailscaled will handle certificate provisioning automatically
+	}
+
+	// Configure service advertisement if needed
+	if hasService(&cfg) {
+		// TODO(tomhjp): This gets users to configure "foo" as the service name,
+		// not "svc:foo". Is that consistent with other config?
+		serviceName := tailcfg.ServiceName("svc:" + cfg.Parsed.KubeAPIServer.TailscaleService.Name)
+		logger.Infof("Configuring to advertise Tailscale Service: %s", serviceName)
+
+		status, err := lc.StatusWithoutPeers(ctx)
+		if err != nil {
+			return fmt.Errorf("error getting local client status: %w", err)
+		}
+		serviceHostPort := ipn.HostPort(fmt.Sprintf("%s.%s:443", serviceName.WithoutPrefix(), status.CurrentTailnet.MagicDNSSuffix))
+
+		// Set up a ServeConfig to listen on localhost:8080
+		serveConfig := &ipn.ServeConfig{
+			// Configure for the Service hostname.
+			Services: map[tailcfg.ServiceName]*ipn.ServiceConfig{
+				serviceName: {
+					TCP: map[uint16]*ipn.TCPPortHandler{
+						443: {
+							HTTPS: true,
+						},
+					},
+					Web: map[ipn.HostPort]*ipn.WebServerConfig{
+						serviceHostPort: {
+							Handlers: map[string]*ipn.HTTPHandler{
+								"/": {
+									Proxy: "http://localhost:8080",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		if err := lc.SetServeConfig(ctx, serveConfig); err != nil {
+			return fmt.Errorf("error setting serve config: %w", err)
+		}
+
+		if _, err := lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+			AdvertiseServicesSet: true,
+			Prefs: ipn.Prefs{
+				AdvertiseServices: []string{serviceName.String()},
+			},
+		}); err != nil {
+			return fmt.Errorf("error setting prefs AdvertiseServices: %w", err)
+		}
+
+		logger.Infof("Successfully set serve config for Tailscale Service: %s", serviceName)
+	}
+
 	// Setup for the API server proxy.
 	restConfig, err := getRestConfig(logger)
 	if err != nil {
@@ -142,7 +213,7 @@ func run(logger *zap.SugaredLogger) error {
 			authMode = v
 		}
 	}
-	ap, err := apiproxy.NewAPIServerProxy(logger.Named("apiserver-proxy"), restConfig, ts, authMode)
+	ap, err := apiproxy.NewAPIServerProxy(logger.Named("apiserver-proxy"), restConfig, ts, authMode, hasService(&cfg))
 	if err != nil {
 		return fmt.Errorf("error creating api server proxy: %w", err)
 	}
@@ -194,4 +265,10 @@ func getRestConfig(logger *zap.SugaredLogger) (*rest.Config, error) {
 	}
 
 	return restConfig, nil
+}
+
+func hasService(cfg *conf.Config) bool {
+	return cfg.Parsed.KubeAPIServer != nil &&
+		cfg.Parsed.KubeAPIServer.TailscaleService != nil &&
+		cfg.Parsed.KubeAPIServer.TailscaleService.Name != ""
 }

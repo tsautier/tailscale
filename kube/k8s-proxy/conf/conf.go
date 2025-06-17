@@ -56,7 +56,15 @@ type ConfigV1Alpha1 struct {
 }
 
 type KubeAPIServer struct {
-	AuthMode opt.Bool `json:",omitempty"`
+	AuthMode         opt.Bool          `json:",omitempty"`
+	TailscaleService *TailscaleService `json:",omitempty"` // Configuration for the Tailscale Service
+}
+
+// TailscaleService contains configuration for the Tailscale Service
+// that the k8s-proxy will advertise.
+type TailscaleService struct {
+	Name           string `json:",omitempty"` // Name of the Tailscale Service
+	DoProvisioning bool   `json:",omitempty"` // Whether this pod should provision certificates
 }
 
 // Load reads and parses the config file at the provided path on disk.

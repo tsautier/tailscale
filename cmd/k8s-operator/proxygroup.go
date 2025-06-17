@@ -454,7 +454,7 @@ func (r *ProxyGroupReconciler) maybeUpdateStatus(ctx context.Context, logger *za
 			reason = reasonProxyGroupAvailable
 		}
 	}
-	tsoperator.SetProxyGroupCondition(pg, tsapi.ProxyGroupAvailable, status, reason, message, 0, r.clock, logger)
+	tsoperator.SetProxyGroupCondition(pg, tsapi.ProxyGroupAvailable, status, reason, message, pg.Generation, r.clock, logger)
 
 	// Set ProxyGroupReady condition.
 	status = metav1.ConditionFalse
@@ -815,6 +815,11 @@ func (r *ProxyGroupReconciler) ensureConfigSecretsCreated(ctx context.Context, p
 					},
 				},
 			}
+			if len(existingAdvertiseServices) > 0 {
+				cfg.KubeAPIServer.TailscaleService = &conf.TailscaleService{
+					Name: existingAdvertiseServices[0],
+				}
+			}
 			cfgB, err := json.Marshal(cfg)
 			if err != nil {
 				return nil, fmt.Errorf("error marshalling k8s-proxy config: %w", err)
@@ -1011,16 +1016,28 @@ func extractAdvertiseServicesConfig(cfgSecret *corev1.Secret) ([]string, error) 
 		return nil, nil
 	}
 
-	conf, err := latestConfigFromSecret(cfgSecret)
+	cfg, err := latestConfigFromSecret(cfgSecret)
 	if err != nil {
 		return nil, err
 	}
 
-	if conf == nil {
+	if k8sProxyCfg, ok := cfgSecret.Data[kubeAPIServerConfigFile]; cfg == nil && ok {
+		var k8sCfg conf.ConfigV1Alpha1
+		if err := json.Unmarshal(k8sProxyCfg, &k8sCfg); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal kube-apiserver config: %w", err)
+		}
+		if k8sCfg.KubeAPIServer != nil &&
+			k8sCfg.KubeAPIServer.TailscaleService != nil &&
+			k8sCfg.KubeAPIServer.TailscaleService.Name != "" {
+			return []string{k8sCfg.KubeAPIServer.TailscaleService.Name}, nil
+		}
+	}
+
+	if cfg == nil {
 		return nil, nil
 	}
 
-	return conf.AdvertiseServices, nil
+	return cfg.AdvertiseServices, nil
 }
 
 // getNodeMetadata gets metadata for all the pods owned by this ProxyGroup by

@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
@@ -45,7 +46,7 @@ var (
 //     caller's Tailscale identity and the rules defined in the tailnet ACLs.
 //   - false: the proxy is started and requests are passed through to the
 //     Kubernetes API without any auth modifications.
-func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsnet.Server, authMode bool) (*APIServerProxy, error) {
+func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsnet.Server, authMode bool, serveLocal bool) (*APIServerProxy, error) {
 	if !authMode {
 		restConfig = rest.AnonymousClientConfig(restConfig)
 	}
@@ -83,6 +84,7 @@ func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsn
 		log:         zlog,
 		lc:          lc,
 		authMode:    authMode,
+		serveLocal:  serveLocal,
 		upstreamURL: u,
 		ts:          ts,
 	}
@@ -102,7 +104,8 @@ func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsn
 //
 // It return when ctx is cancelled or ServeTLS fails.
 func (ap *APIServerProxy) Run(ctx context.Context) error {
-	ln, err := ap.ts.Listen("tcp", ":443")
+	// Listen on the device's tailnet hostname, which ignores the Tailscale Service.
+	tsLn, err := ap.ts.Listen("tcp", ":443")
 	if err != nil {
 		return fmt.Errorf("could not listen on :443: %v", err)
 	}
@@ -124,21 +127,39 @@ func (ap *APIServerProxy) Run(ctx context.Context) error {
 	}
 
 	errs := make(chan error)
+
 	go func() {
-		ap.log.Infof("API server proxy is listening on %s with auth mode: %v", ln.Addr(), ap.authMode)
-		if err := ap.hs.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
-			errs <- fmt.Errorf("failed to serve: %w", err)
+		ap.log.Infof("API server proxy is listening on %s with auth mode: %v", tsLn.Addr(), ap.authMode)
+		if err := ap.hs.ServeTLS(tsLn, "", ""); err != nil && err != http.ErrServerClosed {
+			errs <- fmt.Errorf("failed to serve on tsLn: %w", err)
 		}
 	}()
 
+	if ap.serveLocal {
+		// Listen on local loopback, which serve config forwards Tailscale Service traffic to.
+		localLn, err := net.Listen("tcp", "localhost:8080")
+		if err != nil {
+			return fmt.Errorf("could not listen on localhost:8080: %v", err)
+		}
+		go func() {
+			ap.log.Infof("API server proxy is listening on %s with auth mode: %v", localLn.Addr(), ap.authMode)
+			if err := ap.hs.Serve(localLn); err != nil && err != http.ErrServerClosed {
+				errs <- fmt.Errorf("failed to serve on localLn: %w", err)
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return ap.hs.Shutdown(shutdownCtx)
 	case err := <-errs:
+		ap.hs.Close()
 		return err
 	}
+
+	// Graceful shutdown with a timeout of 10s.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return ap.hs.Shutdown(shutdownCtx)
 }
 
 // APIServerProxy is an [net/http.Handler] that authenticates requests using the Tailscale
@@ -148,7 +169,8 @@ type APIServerProxy struct {
 	lc  *local.Client
 	rp  *httputil.ReverseProxy
 
-	authMode    bool
+	authMode    bool // Whether to run with impersonation using caller's tailnet identity.
+	serveLocal  bool // Whether to serve locally on :8080 for forwarded Tailscale Service traffic.
 	ts          *tsnet.Server
 	hs          *http.Server
 	upstreamURL *url.URL

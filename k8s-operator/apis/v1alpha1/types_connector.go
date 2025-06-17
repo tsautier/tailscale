@@ -226,4 +226,8 @@ const (
 
 	IngressSvcValid      ConditionType = `TailscaleIngressSvcValid`
 	IngressSvcConfigured ConditionType = `TailscaleIngressSvcConfigured`
+
+	APIServerProxyValid      ConditionType = `APIServerProxyValid`      // The API server proxy configuration is valid.
+	APIServerProxyConfigured ConditionType = `APIServerProxyConfigured` // The API server proxy configuration has been applied to the ProxyGroup.
+	APIServerProxyReady      ConditionType = `APIServerProxyReady`      // The API server proxy is ready to serve requests.
 )
