@@ -347,12 +347,12 @@ authLoop:
 					if hasKubeStateStore(cfg) {
 						setErr := kc.setReissueAuthKey(bootCtx, tailscaledConfigAuthkey)
 						if setErr != nil {
-							return fmt.Errorf("failed to set reissue_authkey in kube Secret after NeedsLogin state change: %w", setErr)
+							return fmt.Errorf("failed to set reissue_authkey in Kubernetes Secret after NeedsLogin state change: %w", setErr)
 						}
 
-						return fmt.Errorf("invalid state: tailscaled daemon started with a config file, but tailscale is not logged in; auth key reissue from operator requested")
+						return errors.New("invalid state: tailscaled daemon started with a config file, but tailscale is not logged in; auth key reissue from operator requested")
 					}
-					return fmt.Errorf("invalid state: tailscaled daemon started with a config file, but tailscale is not logged in: ensure you pass a valid auth key in the config file")
+					return errors.New("invalid state: tailscaled daemon started with a config file, but tailscale is not logged in: ensure you pass a valid auth key in the config file")
 				}
 				if err := authTailscale(); err != nil {
 					return fmt.Errorf("failed to auth tailscale: %w", err)
@@ -380,9 +380,9 @@ authLoop:
 				if isOneStepConfig(cfg) && hasKubeStateStore(cfg) {
 					err := kc.setReissueAuthKey(bootCtx, tailscaledConfigAuthkey)
 					if err != nil {
-						return fmt.Errorf("failed to set reissue_authkey in kube Secret after login state warning: %w", err)
+						return fmt.Errorf("failed to set reissue_authkey in Kubernetes Secret after login state warning: %w", err)
 					}
-					return fmt.Errorf("tailscaled failed to log in with the auth key from its config file; auth key reissue from operator requested")
+					return errors.New("tailscaled failed to log in with the auth key from its config file; auth key reissue from operator requested")
 				}
 			}
 		}
@@ -411,9 +411,9 @@ authLoop:
 		// We were told to only auth once, so any secret-bound
 		// authkey is no longer needed. We don't strictly need to
 		// wipe it, but it's good hygiene.
-		log.Printf("Deleting authkey from kube secret")
+		log.Printf("Deleting authkey from Kubernetes Secret")
 		if err := kc.deleteAuthKey(ctx); err != nil {
-			return fmt.Errorf("deleting authkey from kube secret: %w", err)
+			return fmt.Errorf("deleting authkey from Kubernetes Secret: %w", err)
 		}
 	}
 
@@ -921,9 +921,7 @@ func runHTTPServer(mux *http.ServeMux, addr string) (close func() error) {
 }
 
 func authkeyFromTailscaledConfig(path string) string {
-	if cfg, err := conffile.Load(path); err != nil {
-		return ""
-	} else if cfg.Parsed.AuthKey != nil {
+	if cfg, err := conffile.Load(path); err == nil && cfg.Parsed.AuthKey != nil {
 		return *cfg.Parsed.AuthKey
 	}
 
