@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -36,37 +37,25 @@ import (
 var (
 	// counterNumRequestsproxies counts the number of API server requests proxied via this proxy.
 	counterNumRequestsProxied = clientmetric.NewCounter("k8s_auth_proxy_requests_proxied")
-	whoIsKey                  = ctxkey.New("", (*apitype.WhoIsResponse)(nil))
+	requestDataKey            = ctxkey.New("apiproxy.requestData", requestData{})
 )
+
+// requestData is added to every request context.
+type requestData struct {
+	who         *apitype.WhoIsResponse // The Tailscale identity of the requester, never nil.
+	impersonate bool                   // Whether to add impersonation headers.
+}
 
 // NewAPIServerProxy creates a new APIServerProxy that's ready to start once Run
 // is called. No network traffic will flow until Run is called.
-//
-// authMode controls how the proxy behaves:
-//   - true: the proxy is started and requests are impersonated using the
-//     caller's Tailscale identity and the rules defined in the tailnet ACLs.
-//   - false: the proxy is started and requests are passed through to the
-//     Kubernetes API without any auth modifications.
-func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsnet.Server, authMode bool, https bool) (*APIServerProxy, error) {
-	if !authMode {
-		restConfig = rest.AnonymousClientConfig(restConfig)
-	}
-
-	cfg, err := restConfig.TransportConfig()
+func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsnet.Server, initialMode kubetypes.APIServerProxyMode, https bool) (*APIServerProxy, error) {
+	authTransport, err := roundTripperForConfig(restConfig)
 	if err != nil {
-		return nil, fmt.Errorf("could not get rest.TransportConfig(): %w", err)
+		return nil, err
 	}
-
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig, err = transport.TLSConfigFor(cfg)
+	plainTransport, err := roundTripperForConfig(rest.AnonymousClientConfig(restConfig))
 	if err != nil {
-		return nil, fmt.Errorf("could not get transport.TLSConfigFor(): %w", err)
-	}
-	tr.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-
-	rt, err := transport.HTTPWrappersForConfig(cfg, tr)
-	if err != nil {
-		return nil, fmt.Errorf("could not get rest.TransportConfig(): %w", err)
+		return nil, err
 	}
 
 	u, err := url.Parse(restConfig.Host)
@@ -85,19 +74,45 @@ func NewAPIServerProxy(zlog *zap.SugaredLogger, restConfig *rest.Config, ts *tsn
 	ap := &APIServerProxy{
 		log:         zlog,
 		lc:          lc,
-		authMode:    authMode,
+		mode:        atomic.Value{},
 		https:       https,
 		upstreamURL: u,
 		ts:          ts,
 	}
+	ap.mode.Store(initialMode)
 	ap.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			ap.addImpersonationHeadersAsRequired(pr.Out)
 		},
-		Transport: rt,
+		Transport: &switchingTransport{
+			authTransport:  authTransport,
+			plainTransport: plainTransport,
+		},
+		ErrorLog: zap.NewStdLog(zlog.Desugar()),
 	}
 
 	return ap, nil
+}
+
+func roundTripperForConfig(restConfig *rest.Config) (http.RoundTripper, error) {
+	cfg, err := restConfig.TransportConfig()
+	if err != nil {
+		return nil, fmt.Errorf("could not get rest.TransportConfig(): %w", err)
+	}
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig, err = transport.TLSConfigFor(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("could not get transport.TLSConfigFor(): %w", err)
+	}
+	tr.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+
+	rt, err := transport.HTTPWrappersForConfig(cfg, tr)
+	if err != nil {
+		return nil, fmt.Errorf("could not get rest.TransportConfig(): %w", err)
+	}
+
+	return rt, nil
 }
 
 // Run starts the HTTP server that authenticates requests using the
@@ -114,14 +129,10 @@ func (ap *APIServerProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods/{pod}/attach", ap.serveAttachWS)
 
 	ap.hs = &http.Server{
-		Handler:  mux,
+		Handler:  ap.reqDataMiddleware(mux),
 		ErrorLog: zap.NewStdLog(ap.log.Desugar()),
 	}
 
-	mode := "noauth"
-	if ap.authMode {
-		mode = "auth"
-	}
 	var tsLn net.Listener
 	var serve func(ln net.Listener) error
 	if ap.https {
@@ -152,7 +163,7 @@ func (ap *APIServerProxy) Run(ctx context.Context) error {
 
 	errs := make(chan error)
 	go func() {
-		ap.log.Infof("API server proxy in %q mode is listening on %s", mode, tsLn.Addr())
+		ap.log.Infof("API server proxy in %q mode is listening on %s", ap.mode.Load().(kubetypes.APIServerProxyMode), tsLn.Addr())
 		if err := serve(tsLn); err != nil && err != http.ErrServerClosed {
 			errs <- fmt.Errorf("error serving: %w", err)
 		}
@@ -171,6 +182,22 @@ func (ap *APIServerProxy) Run(ctx context.Context) error {
 	return ap.hs.Shutdown(shutdownCtx)
 }
 
+// SetAuthMode controls how the proxy behaves on future requests. In-flight
+// requests will not be affected. Returns the old mode.
+//
+//   - auth: requests are impersonated using the caller's Tailscale identity
+//     and the rules defined in the tailnet ACLs.
+//   - noauth: requests are passed through to the Kubernetes API without any
+//     auth header modifications.
+func (ap *APIServerProxy) SetAuthMode(mode kubetypes.APIServerProxyMode) (old kubetypes.APIServerProxyMode) {
+	old = (ap.mode.Swap(mode)).(kubetypes.APIServerProxyMode)
+	if old != mode {
+		ap.log.Infof("API server proxy switching to %q mode for new requests", mode)
+	}
+
+	return old
+}
+
 // APIServerProxy is an [net/http.Handler] that authenticates requests using the Tailscale
 // LocalAPI and then proxies them to the Kubernetes API.
 type APIServerProxy struct {
@@ -178,8 +205,8 @@ type APIServerProxy struct {
 	lc  *local.Client
 	rp  *httputil.ReverseProxy
 
-	authMode    bool // Whether to run with impersonation using caller's tailnet identity.
-	https       bool // Whether to serve on https for the device hostname; true for k8s-operator, false for k8s-proxy.
+	mode        atomic.Value // kubetypes.APIServerProxyMode; "auth" or "noauth".
+	https       bool         // Whether to serve on https for the device hostname; true for k8s-operator, false for k8s-proxy.
 	ts          *tsnet.Server
 	hs          *http.Server
 	upstreamURL *url.URL
@@ -187,13 +214,8 @@ type APIServerProxy struct {
 
 // serveDefault is the default handler for Kubernetes API server requests.
 func (ap *APIServerProxy) serveDefault(w http.ResponseWriter, r *http.Request) {
-	who, err := ap.whoIs(r)
-	if err != nil {
-		ap.authError(w, err)
-		return
-	}
 	counterNumRequestsProxied.Add(1)
-	ap.rp.ServeHTTP(w, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
+	ap.rp.ServeHTTP(w, r)
 }
 
 // serveExecSPDY serves '/exec' requests for sessions streamed over SPDY,
@@ -227,11 +249,7 @@ func (ap *APIServerProxy) sessionForProto(w http.ResponseWriter, r *http.Request
 		upgradeHeaderKey = "Upgrade"
 	)
 
-	who, err := ap.whoIs(r)
-	if err != nil {
-		ap.authError(w, err)
-		return
-	}
+	who := requestDataKey.Value(r.Context()).who
 	counterNumRequestsProxied.Add(1)
 	failOpen, addrs, err := determineRecorderConfig(who)
 	if err != nil {
@@ -239,7 +257,7 @@ func (ap *APIServerProxy) sessionForProto(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if failOpen && len(addrs) == 0 { // will not record
-		ap.rp.ServeHTTP(w, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
+		ap.rp.ServeHTTP(w, r)
 		return
 	}
 	ksr.CounterSessionRecordingsAttempted.Add(1) // at this point we know that users intended for this session to be recorded
@@ -256,7 +274,7 @@ func (ap *APIServerProxy) sessionForProto(w http.ResponseWriter, r *http.Request
 		if failOpen {
 			msg = msg + "; failure mode is 'fail open'; continuing session without recording."
 			ap.log.Warn(msg)
-			ap.rp.ServeHTTP(w, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
+			ap.rp.ServeHTTP(w, r)
 			return
 		}
 		ap.log.Error(msg)
@@ -278,15 +296,15 @@ func (ap *APIServerProxy) sessionForProto(w http.ResponseWriter, r *http.Request
 		Namespace:   r.PathValue(namespaceNameKey),
 		Log:         ap.log,
 	}
-	h := ksr.New(opts)
 
-	ap.rp.ServeHTTP(h, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
+	ap.rp.ServeHTTP(ksr.NewHijacker(opts), r)
 }
 
 func (ap *APIServerProxy) addImpersonationHeadersAsRequired(r *http.Request) {
 	r.URL.Scheme = ap.upstreamURL.Scheme
 	r.URL.Host = ap.upstreamURL.Host
-	if !ap.authMode {
+	reqData := requestDataKey.Value(r.Context())
+	if !reqData.impersonate {
 		// If we are not providing authentication, then we are just
 		// proxying to the Kubernetes API, so we don't need to do
 		// anything else.
@@ -316,13 +334,26 @@ func (ap *APIServerProxy) addImpersonationHeadersAsRequired(r *http.Request) {
 	}
 }
 
-func (ap *APIServerProxy) whoIs(r *http.Request) (*apitype.WhoIsResponse, error) {
-	return ap.lc.WhoIs(r.Context(), r.RemoteAddr)
-}
-
 func (ap *APIServerProxy) authError(w http.ResponseWriter, err error) {
 	ap.log.Errorf("failed to authenticate caller: %v", err)
 	http.Error(w, "failed to authenticate caller", http.StatusInternalServerError)
+}
+
+// reqDataMiddleware ensures the Tailscale identity and whether to impersonate or
+// not is embedded in the request context before the request is handled.
+func (ap *APIServerProxy) reqDataMiddleware(inner *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		who, err := ap.lc.WhoIs(r.Context(), r.RemoteAddr)
+		if err != nil || who == nil { // "who" should never be nil if err is nil.
+			ap.authError(w, err)
+			return
+		}
+		ctx := requestDataKey.WithValue(r.Context(), requestData{
+			who:         who,
+			impersonate: ap.mode.Load().(kubetypes.APIServerProxyMode) == kubetypes.APIServerProxyModeAuth,
+		})
+		inner.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 const (
@@ -339,7 +370,7 @@ const (
 // in the context by the apiserverProxy.
 func addImpersonationHeaders(r *http.Request, log *zap.SugaredLogger) error {
 	log = log.With("remote", r.RemoteAddr)
-	who := whoIsKey.Value(r.Context())
+	who := requestDataKey.Value(r.Context()).who
 	rules, err := tailcfg.UnmarshalCapJSON[kubetypes.KubernetesCapRule](who.CapMap, tailcfg.PeerCapabilityKubernetes)
 	if len(rules) == 0 && err == nil {
 		// Try the old capability name for backwards compatibility.

@@ -34,6 +34,7 @@ import (
 	apiproxy "tailscale.com/k8s-operator/api-proxy"
 	"tailscale.com/kube/certs"
 	"tailscale.com/kube/k8s-proxy/conf"
+	"tailscale.com/kube/kubetypes"
 	klc "tailscale.com/kube/localclient"
 	"tailscale.com/kube/services"
 	"tailscale.com/kube/state"
@@ -238,11 +239,11 @@ func run(logger *zap.SugaredLogger) error {
 	}
 
 	// Setup for the API server proxy.
-	authMode := true
-	if cfg.Parsed.APIServerProxy != nil && cfg.Parsed.APIServerProxy.AuthMode.EqualBool(false) {
-		authMode = false
+	mode := kubetypes.APIServerProxyModeAuth
+	if cfg.Parsed.APIServerProxy != nil {
+		mode = *cfg.Parsed.APIServerProxy.Mode
 	}
-	ap, err := apiproxy.NewAPIServerProxy(logger.Named("apiserver-proxy"), restConfig, ts, authMode, false)
+	ap, err := apiproxy.NewAPIServerProxy(logger.Named("apiserver-proxy"), restConfig, ts, mode, false)
 	if err != nil {
 		return fmt.Errorf("error creating api server proxy: %w", err)
 	}
@@ -292,6 +293,12 @@ func run(logger *zap.SugaredLogger) error {
 			if !prefs.IsEmpty() {
 				if _, err := lc.EditPrefs(ctx, &prefs); err != nil {
 					return fmt.Errorf("error editing prefs: %w", err)
+				}
+			}
+			if cfg.Parsed.APIServerProxy != nil && cfg.Parsed.APIServerProxy.Mode != nil {
+				oldMode := ap.SetAuthMode(*cfg.Parsed.APIServerProxy.Mode)
+				if oldMode != *cfg.Parsed.APIServerProxy.Mode {
+					cfgLogger = cfgLogger.With("APIServerProxyMode", fmt.Sprintf("%q -> %q", oldMode, *cfg.Parsed.APIServerProxy.Mode))
 				}
 			}
 			if err := setServeConfig(ctx, lc, cm, apiServerProxyService(cfg)); err != nil {
