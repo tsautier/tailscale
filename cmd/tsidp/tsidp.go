@@ -843,6 +843,7 @@ func (s *idpServer) oidcSigner() (jose.Signer, error) {
 }
 
 func (s *idpServer) oidcPrivateKey() (*signingKey, error) {
+	keyPath := filepath.Join(*flagDir, "oidc-key.json")
 	return s.lazySigningKey.GetErr(func() (*signingKey, error) {
 		keyPath, err := getConfigFilePath(s.rootPath, oidcKeyFile)
 		if err != nil {
