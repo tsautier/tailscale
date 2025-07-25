@@ -57,7 +57,7 @@ func EnsureServicesNotAdvertised(ctx context.Context, lc *local.Client, logf log
 	select {
 	case <-ctx.Done():
 		return nil
-	case <-time.After(20 * time.Second):
+	case <-time.After(2 * time.Second):
 		return nil
 	}
 }

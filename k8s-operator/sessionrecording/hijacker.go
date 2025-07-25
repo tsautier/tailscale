@@ -216,6 +216,7 @@ func (h *Hijacker) setUpRecording(ctx context.Context, conn net.Conn) (net.Conn,
 		var err error
 		select {
 		case <-ctx.Done():
+			h.log.Infof("FOOOOOOOOOO session recording context done, closing connection: %v", ctx.Err())
 			return
 		case err = <-errChan:
 		}
@@ -236,7 +237,6 @@ func (h *Hijacker) setUpRecording(ctx context.Context, conn net.Conn) (net.Conn,
 		if err := lc.Close(); err != nil {
 			h.log.Infof("error closing recorder connections: %v", err)
 		}
-		return
 	}()
 	return lc, nil
 }

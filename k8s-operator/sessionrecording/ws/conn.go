@@ -139,18 +139,21 @@ func (c *conn) Read(b []byte) (int, error) {
 		// It seems that we sometimes get a wrapped io.EOF, but the
 		// caller checks for io.EOF with ==.
 		if errors.Is(err, io.EOF) {
+			c.log.Infof("FOOOOOOOOOOOO: got %v from read, returning EOF", err)
 			err = io.EOF
 		}
-		return 0, err
+		c.log.Infof("FOOOOOOOOOOO: Read errored: %v", err)
+		return n, err
 	}
 	if n == 0 {
-		c.log.Debug("[unexpected] Read called for 0 length bytes")
+		c.log.Info("[unexpected] Read called for 0 length bytes")
 		return 0, nil
 	}
 
 	typ := messageType(opcode(b))
 	if (typ == noOpcode && c.readMsgIsIncomplete()) || c.readBufHasIncompleteFragment() { // subsequent fragment
 		if typ, err = c.curReadMsgType(); err != nil {
+			c.log.Infof("FOOOOOOOOOOOO: got %v from curReadMsgType", err)
 			return 0, err
 		}
 	}
@@ -176,11 +179,13 @@ func (c *conn) Read(b []byte) (int, error) {
 	}
 
 	if _, err := c.readBuf.Write(b[:n]); err != nil {
+		c.log.Infof("FOOOOOOOOOOOO: got %v from readBuf", err)
 		return 0, fmt.Errorf("[unexpected] error writing message contents to read buffer: %w", err)
 	}
 
 	ok, err := readMsg.Parse(c.readBuf.Bytes(), c.log)
 	if err != nil {
+		c.log.Infof("FOOOOOOOOOOOO: got %v from readMsg.Parse", err)
 		return 0, fmt.Errorf("error parsing message: %v", err)
 	}
 	if !ok { // incomplete fragment
@@ -194,8 +199,21 @@ func (c *conn) Read(b []byte) (int, error) {
 		// https://github.com/kubernetes/client-go/blob/v0.30.0-rc.1/tools/remotecommand/websocket.go#L218
 		if readMsg.streamID.Load() == remotecommand.StreamResize && c.hasTerm {
 			var msg tsrecorder.ResizeMsg
-			if err = json.Unmarshal(readMsg.payload, &msg); err != nil {
-				return 0, fmt.Errorf("error umarshalling resize message: %w", err)
+			c.log.Infof("FOOOOOOOOOOOO: unmarshalling payload: %s", string(readMsg.payload))
+			d := json.NewDecoder(bytes.NewReader(readMsg.payload))
+			var count int
+			for d.More() {
+				msg = tsrecorder.ResizeMsg{}
+				if err = d.Decode(&msg); err != nil {
+					c.log.Infof("FOOOOOOOOOOOO: got %v from json.Unmarshal, payload: %s", err, string(readMsg.payload))
+					return 0, fmt.Errorf("error umarshalling resize message: %w", err)
+				}
+				c.log.Infof("FOOOOOOOOOOOO: got resize message: %v", msg)
+				count++
+			}
+			if count == 0 {
+				c.log.Infof("FOOOOOOOOOOOO: unexpectedly no resize messages, payload: %s", string(readMsg.payload))
+				return 0, fmt.Errorf("no resize messages in payload: %s", string(readMsg.payload))
 			}
 
 			c.ch.Width = msg.Width
@@ -213,11 +231,13 @@ func (c *conn) Read(b []byte) (int, error) {
 				close(c.initialCastHeaderSent)
 			})
 			if err != nil {
+				c.log.Infof("FOOOOOOOOOOOO: got %v from rec.WriteCastHeader", err)
 				return 0, fmt.Errorf("error writing CastHeader: %w", err)
 			}
 
 			if !isInitialResize {
 				if err := c.rec.WriteResize(msg.Height, msg.Width); err != nil {
+					c.log.Infof("FOOOOOOOOOOOO: got %v from rec.WriteResize", err)
 					return 0, fmt.Errorf("error writing resize message: %w", err)
 				}
 			}
