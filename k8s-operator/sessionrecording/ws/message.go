@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
 	"golang.org/x/net/websocket"
@@ -107,7 +106,7 @@ func (msg *message) Parse(b []byte, log *zap.SugaredLogger) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("error determining payload length: %w", err)
 	}
-	log.Debugf("parse: parsing a message fragment with payload length: %d payload offset: %d maskOffset: %d mask set: %t, is finalized: %t, is initial fragment: %t", payloadLength, payloadOffset, maskOffset, maskSet, msg.isFinalized, isInitialFragment)
+	log.Infof("parse: parsing a message fragment with payload length: %d payload offset: %d maskOffset: %d mask set: %t, is finalized: %t, is initial fragment: %t", payloadLength, payloadOffset, maskOffset, maskSet, msg.isFinalized, isInitialFragment)
 
 	if len(b) < int(payloadOffset+payloadLength) { // incomplete fragment
 		return false, nil
@@ -136,12 +135,18 @@ func (msg *message) Parse(b []byte, log *zap.SugaredLogger) (bool, error) {
 	// message payload.
 	// https://github.com/kubernetes/apimachinery/commit/73d12d09c5be8703587b5127416eb83dc3b7e182#diff-291f96e8632d04d2d20f5fb00f6b323492670570d65434e8eac90c7a442d13bdR23-R36
 	if len(msgPayload) == 0 {
-		return false, errors.New("[unexpected] received a message fragment with no stream ID")
+		// if !msg.isFinalized {
+		// 	return false, nil
+		// }
+
+		return false, fmt.Errorf("received a message fragment with no stream ID, initial fragment: %v, is finalised: %v", isInitialFragment, msg.isFinalized)
 	}
 
+	// Stream ID will be one of the constants from:
+	// https://github.com/kubernetes/kubernetes/blob/f9ed14bf9b1119a2e091f4b487a3b54930661034/staging/src/k8s.io/apimachinery/pkg/util/remotecommand/constants.go#L57-L64
 	streamID := uint32(msgPayload[0])
 	if !isInitialFragment && msg.streamID.Load() != streamID {
-		return false, fmt.Errorf("[unexpected] received message fragments with mismatched streamIDs %d and %d", msg.streamID.Load(), streamID)
+		return false, fmt.Errorf("[unexpected] received message fragments with mismatched streamIDs %d and %d, payload: %s", msg.streamID.Load(), streamID, string(append(msg.payload, msgPayload...)))
 	}
 	msg.streamID.Store(streamID)
 
