@@ -4966,6 +4966,10 @@ func (b *LocalBackend) NetMap() *netmap.NetworkMap {
 	return b.currentNode().NetMap()
 }
 
+func (b *LocalBackend) NetMapWithPeers() *netmap.NetworkMap {
+	return b.currentNode().netMapWithPeers()
+}
+
 func (b *LocalBackend) isEngineBlocked() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
