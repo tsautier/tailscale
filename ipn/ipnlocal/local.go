@@ -4965,15 +4965,19 @@ func (b *LocalBackend) isEngineBlocked() bool {
 	return b.blocked
 }
 
-// blockEngineUpdate sets b.blocked to block, while holding b.mu. Its
-// indirect effect is to turn b.authReconfig() into a no-op if block
-// is true.
+// blockEngineUpdates sets b.blocked to block, while holding b.mu. Its indirect
+// effect is to turn b.authReconfig() into a no-op if block is true.
 func (b *LocalBackend) blockEngineUpdates(block bool) {
-	b.logf("blockEngineUpdates(%v)", block)
-
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.blockEngineUpdatesLocked(block)
+}
+
+// blockEngineUpdatesLocked implements blockEngineUpdates, but requires the
+// caller to hold b.mu.
+func (b *LocalBackend) blockEngineUpdatesLocked(block bool) {
+	b.logf("blockEngineUpdates(%v)", block)
 	b.blocked = block
-	b.mu.Unlock()
 }
 
 // reconfigAppConnectorLocked updates the app connector state based on the
@@ -5074,6 +5078,18 @@ func (b *LocalBackend) readvertiseAppConnectorRoutes() {
 	if err := b.AdvertiseRoute(prefixes...); err != nil {
 		b.logf("error advertising stored app connector routes: %v", err)
 	}
+}
+
+// authReconfigLocked calls authReconfig, but requires the caller to hold b.mu.
+//
+// TODO(creachadair): This is a workaround (2025-08-25) to let us update lock
+// discipline elsewhere in the backend that is currently doing complex lock
+// shuffling to work around calls to authReconfig. All it does is release the
+// lock and reacquire it when authReconfig returns, to preserve semantics.
+func (b *LocalBackend) authReconfigLocked() {
+	b.mu.Unlock()
+	defer b.mu.Lock()
+	b.authReconfig()
 }
 
 // authReconfig pushes a new configuration into wgengine, if engine

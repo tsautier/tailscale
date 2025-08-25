@@ -212,6 +212,18 @@ func (r *rotationTracker) obsoleteKeys() set.Set[key.NodePublic] {
 	return r.obsolete
 }
 
+// tkaSyncIfNeededLocked calls tkaSyncIfNeeded, but requires the caller to hold b.mu.
+//
+// TODO(creachadair): This is a workaround (2025-08-25) to let us update lock
+// discipline elsewhere in the backend that is currently doing complex lock
+// shuffling to work around calls to tkaSyncIfNeeded. All it does is release
+// the lock and reacquire it when tkaSyncIfNeeded returns, to preserve semantics.
+func (b *LocalBackend) tkaSyncIfNeededLocked(nm *netmap.NetworkMap, prefs ipn.PrefsView) error {
+	b.mu.Unlock() // N.B. release so tkaSyncIfNeeded can re-acquire
+	defer b.mu.Lock()
+	return b.tkaSyncIfNeeded(nm, prefs)
+}
+
 // tkaSyncIfNeeded examines TKA info reported from the control plane,
 // performing the steps necessary to synchronize local tka state.
 //
@@ -232,7 +244,7 @@ func (r *rotationTracker) obsoleteKeys() set.Set[key.NodePublic] {
 func (b *LocalBackend) tkaSyncIfNeeded(nm *netmap.NetworkMap, prefs ipn.PrefsView) error {
 	b.tkaSyncLock.Lock() // take tkaSyncLock to make this function an exclusive section.
 	defer b.tkaSyncLock.Unlock()
-	b.mu.Lock() // take mu to protect access to synchronized fields.
+	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.tka == nil && !b.capTailnetLock {
