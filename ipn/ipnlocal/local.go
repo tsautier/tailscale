@@ -1493,8 +1493,8 @@ func (b *LocalBackend) GetFilterForTest() *filter.Filter {
 // SetControlClientStatus is the callback invoked by the control client whenever it posts a new status.
 // Among other things, this is where we update the netmap, packet filters, DNS and DERP maps.
 func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st controlclient.Status) {
-	unlock := b.lockAndGetUnlock()
-	defer unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	if b.cc != c {
 		b.logf("Ignoring SetControlClientStatus from old client")
@@ -1568,24 +1568,26 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		b.keyExpired = isExpired
 	}
 
-	unlock.UnlockEarly()
-
 	if keyExpiryExtended && wasBlocked {
 		// Key extended, unblock the engine
-		b.blockEngineUpdates(false)
+		b.blockEngineUpdatesLocked(false)
 	}
 
 	if st.LoginFinished() && (wasBlocked || b.seamlessRenewalEnabled()) {
 		if wasBlocked {
 			// Auth completed, unblock the engine
-			b.blockEngineUpdates(false)
+			b.blockEngineUpdatesLocked(false)
 		}
-		b.authReconfig()
-		b.send(ipn.Notify{LoginFinished: &empty.Message{}})
+		b.authReconfigLocked()
+		b.sendToLocked(ipn.Notify{LoginFinished: &empty.Message{}}, allClients)
 	}
 
-	// Lock b again and do only the things that require locking.
-	b.mu.Lock()
+	// TODO(creachadair): At this point we hold b.mu, but the code below makes
+	// several excursions outside the lock. The code as-written already takes
+	// this into account (as of 2025-08-25), and will re-check state that may
+	// have been modified elsewhere, but when making changes to the order of
+	// operations, you must NOT assume that calling a method with opinions about
+	// the state of b.mu will itself share the same critical section.
 
 	prefsChanged := false
 	cn := b.currentNode()
@@ -1667,11 +1669,9 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		b.capTailnetLock = st.NetMap.HasCap(tailcfg.CapabilityTailnetLock)
 		b.setWebClientAtomicBoolLocked(st.NetMap)
 
-		b.mu.Unlock() // respect locking rules for tkaSyncIfNeeded
-		if err := b.tkaSyncIfNeeded(st.NetMap, prefs.View()); err != nil {
+		if err := b.tkaSyncIfNeededLocked(st.NetMap, prefs.View()); err != nil {
 			b.logf("[v1] TKA sync error: %v", err)
 		}
-		b.mu.Lock()
 		// As we stepped outside of the lock, it's possible for b.cc
 		// to now be nil.
 		if b.cc != nil {
@@ -1712,8 +1712,7 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 			}); err != nil {
 				b.logf("Failed to save new controlclient state: %v", err)
 			}
-			b.mu.Unlock()
-			b.send(ipn.Notify{ErrMessage: &msg, Prefs: &p})
+			b.sendToLocked(ipn.Notify{ErrMessage: &msg, Prefs: &p}, allClients)
 			return
 		}
 		if oldNetMap != nil {
@@ -1751,10 +1750,11 @@ func (b *LocalBackend) SetControlClientStatus(c controlclient.Client, st control
 		b.logf("Received auth URL: %.20v...", st.URL)
 		b.setAuthURL(st.URL)
 	}
-	b.stateMachine()
+	b.mu.Lock() // balances the deferred unlock at the head
+	b.stateMachineLocked()
 	// This is currently (2020-07-28) necessary; conditionally disabling it is fragile!
 	// This is where netmap information gets propagated to router and magicsock.
-	b.authReconfig()
+	b.authReconfigLocked()
 }
 
 type preferencePolicyInfo struct {
