@@ -86,11 +86,12 @@ func (v *PersistView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-func (v PersistView) PrivateNodeKey() key.NodePrivate    { return v.ж.PrivateNodeKey }
-func (v PersistView) OldPrivateNodeKey() key.NodePrivate { return v.ж.OldPrivateNodeKey }
-func (v PersistView) UserProfile() tailcfg.UserProfile   { return v.ж.UserProfile }
-func (v PersistView) NetworkLockKey() key.NLPrivate      { return v.ж.NetworkLockKey }
-func (v PersistView) NodeID() tailcfg.StableNodeID       { return v.ж.NodeID }
+func (v PersistView) PrivateNodeKey() key.NodePrivate      { return v.ж.PrivateNodeKey }
+func (v PersistView) OldPrivateNodeKey() key.NodePrivate   { return v.ж.OldPrivateNodeKey }
+func (v PersistView) UserProfile() tailcfg.UserProfile     { return v.ж.UserProfile }
+func (v PersistView) NetworkLockKey() key.NLPrivate        { return v.ж.NetworkLockKey }
+func (v PersistView) NodeID() tailcfg.StableNodeID         { return v.ж.NodeID }
+func (v PersistView) AttestationKey() tailcfg.StableNodeID { panic("unsupported") }
 func (v PersistView) DisallowedTKAStateIDs() views.Slice[string] {
 	return views.SliceOf(v.ж.DisallowedTKAStateIDs)
 }
@@ -103,5 +104,6 @@ var _PersistViewNeedsRegeneration = Persist(struct {
 	UserProfile           tailcfg.UserProfile
 	NetworkLockKey        key.NLPrivate
 	NodeID                tailcfg.StableNodeID
+	AttestationKey        key.HardwareAttestationKey
 	DisallowedTKAStateIDs []string
 }{})
