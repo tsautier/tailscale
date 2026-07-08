@@ -28,6 +28,7 @@ import (
 	"tailscale.com/ipn/ipnext"
 	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/syncs"
+	xacme "tailscale.com/tempfork/acme"
 	"tailscale.com/tsconst"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/clientmetric"
@@ -171,7 +172,16 @@ func getCertPEMHook(ctx context.Context, b *ipnlocal.LocalBackend, domain string
 	if err != nil {
 		return nil, err
 	}
-	return e.getCertPEMWithValidity(ctx, b, domain, minValidity)
+	pair, err := e.getCertPEMWithValidity(ctx, b, domain, minValidity)
+	if err != nil {
+		if ae, ok := errors.AsType[*xacme.Error](err); ok {
+			if d, ok := xacme.RateLimit(ae); ok {
+				return nil, certRateLimitedError{retryAfter: d, underlying: err}
+			}
+		}
+		return nil, err
+	}
+	return pair, nil
 }
 
 func getACMETLSALPNCertHook(b *ipnlocal.LocalBackend, hi *tls.ClientHelloInfo) (*tls.Certificate, bool) {
