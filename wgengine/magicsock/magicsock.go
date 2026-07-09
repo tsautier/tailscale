@@ -327,12 +327,6 @@ type Conn struct {
 	// for a period of time before withdrawing them.
 	endpointTracker endpointTracker
 
-	// peerSet is the set of peers that are currently configured in
-	// WireGuard. These are not used to filter inbound or outbound
-	// traffic at all, but only to track what state can be cleaned up
-	// in other maps below that are keyed by peer public key.
-	peerSet set.Set[key.NodePublic]
-
 	// peerMap tracks the networkmap Node entity for each peer
 	// by node key, node ID, and discovery key.
 	peerMap peerMap
@@ -2801,31 +2795,6 @@ func (c *Conn) SetPrivateKey(privateKey key.NodePrivate) error {
 	return nil
 }
 
-// UpdatePeers is called when the set of WireGuard peers changes. It
-// then removes any state for old peers.
-//
-// The caller passes ownership of newPeers map to UpdatePeers.
-func (c *Conn) UpdatePeers(newPeers set.Set[key.NodePublic]) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	oldPeers := c.peerSet
-	c.peerSet = newPeers
-
-	// Clean up any key.NodePublic-keyed maps for peers that no longer
-	// exist.
-	for peer := range oldPeers {
-		if !newPeers.Contains(peer) {
-			delete(c.derpRoute, peer)
-			delete(c.peerLastDerp, peer)
-		}
-	}
-
-	if len(oldPeers) == 0 && len(newPeers) > 0 {
-		go c.ReSTUN("non-zero-peers")
-	}
-}
-
 // debugRingBufferSize returns a maximum size for our set of endpoint ring
 // buffers by assuming that a single large update is ~500 bytes, and that we
 // want to not use more than 1MiB of memory on phones / 4MiB on other devices.
@@ -3168,7 +3137,21 @@ func (c *Conn) updateNodes(self tailcfg.NodeView, peers []tailcfg.NodeView) (pee
 		// Duplicate NodeIDs in the input shouldn't happen, but log if so.
 		c.logf("[unexpected] magicsock.updateNodes: %d peers input but %d unique IDs", len(peers), len(newPeers))
 	}
+	// Clean up node-key-keyed state for peers that are gone or have
+	// rotated their node key.
+	for id, prev := range c.peersByID {
+		if n, ok := newPeers[id]; !ok || n.Key() != prev.Key() {
+			delete(c.derpRoute, prev.Key())
+			delete(c.peerLastDerp, prev.Key())
+		}
+	}
+	hadPeers := len(c.peersByID) > 0
 	c.peersByID = newPeers
+	// A key-less conn can't STUN; the ReSTUN("set-private-key") on
+	// first key covers peers that arrived before the key.
+	if !hadPeers && len(newPeers) > 0 && !c.privateKey.IsZero() {
+		go c.ReSTUN("non-zero-peers")
+	}
 
 	// If the upsert pass left stale endpoints in peerMap (peers removed
 	// relative to before), clean them up.
@@ -3322,7 +3305,16 @@ func (c *Conn) UpsertPeer(n tailcfg.NodeView) {
 		return
 	}
 	flags := c.debugFlagsLocked()
+	if prev, ok := c.peersByID[n.ID()]; ok && prev.Key() != n.Key() {
+		delete(c.derpRoute, prev.Key())
+		delete(c.peerLastDerp, prev.Key())
+	}
+	hadPeers := len(c.peersByID) > 0
 	mak.Set(&c.peersByID, n.ID(), n)
+	// See the matching trigger in updateNodes for why the key check.
+	if !hadPeers && !c.privateKey.IsZero() {
+		go c.ReSTUN("non-zero-peers")
+	}
 	c.upsertPeerLocked(n, flags, debugRingBufferSize(len(c.peersByID)))
 
 	var relayUpsert candidatePeerRelay
@@ -3360,6 +3352,8 @@ func (c *Conn) RemovePeer(nid tailcfg.NodeID) {
 		return
 	}
 	delete(c.peersByID, nid)
+	delete(c.derpRoute, prev.Key())
+	delete(c.peerLastDerp, prev.Key())
 	if ep, ok := c.peerMap.endpointForNodeID(nid); ok {
 		c.peerMap.deleteEndpoint(ep)
 	}
@@ -3629,7 +3623,7 @@ func (c *Conn) shouldDoPeriodicReSTUNLocked() bool {
 	if c.networkDown() || c.homeless {
 		return false
 	}
-	if len(c.peerSet) == 0 || c.privateKey.IsZero() {
+	if len(c.peersByID) == 0 || c.privateKey.IsZero() {
 		// If no peers, not worth doing.
 		// Also don't if there's no key (not running).
 		return false

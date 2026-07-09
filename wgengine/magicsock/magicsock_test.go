@@ -21,6 +21,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,7 @@ import (
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/eventbus/eventbustest"
+	"tailscale.com/util/mak"
 	"tailscale.com/util/must"
 	"tailscale.com/util/racebuild"
 	"tailscale.com/util/set"
@@ -365,11 +367,6 @@ func meshStacks(logf logger.Logf, mutateNetmap func(idx int, nm *netmap.NetworkM
 		for i, m := range ms {
 			nm := buildNetmapLocked(i)
 			m.conn.SetNetworkMap(nm.SelfNode, nm.Peers)
-			peerSet := make(set.Set[key.NodePublic], len(nm.Peers))
-			for _, peer := range nm.Peers {
-				peerSet.Add(peer.Key())
-			}
-			m.conn.UpdatePeers(peerSet)
 			wg, err := nmcfg.WGCfg(ms[i].privateKey, nm, logf, 0, "")
 			if err != nil {
 				// We're too far from the *testing.T to be graceful,
@@ -2325,6 +2322,116 @@ func TestSetNetworkMapWithNoPeers(t *testing.T) {
 		if c.lastFlags.heartbeatDisabled != v {
 			t.Fatalf("call %d: didn't store netmap", i)
 		}
+	}
+}
+
+// Tests that the full-set peer update path (SetNetworkMap) and the
+// incremental per-peer paths (UpsertPeer, RemovePeer) maintain the
+// node-key-keyed DERP state (derpRoute and peerLastDerp) identically
+// when peers are removed or rotate their node keys. LocalBackend uses
+// either path depending on whether it received a full netmap or a
+// delta, so a change to the cleanup in one path must be made to both.
+func TestPeerDERPStateCleanup(t *testing.T) {
+	peerA := &tailcfg.Node{ID: 1, Key: randNodeKey(), DiscoKey: randDiscoKey(), Endpoints: eps("192.168.1.2:1")}
+	peerB := &tailcfg.Node{ID: 2, Key: randNodeKey(), DiscoKey: randDiscoKey(), Endpoints: eps("192.168.1.2:2")}
+	peerARotated := peerA.Clone()
+	peerARotated.Key = randNodeKey()
+
+	steps := []struct {
+		name  string
+		peers []*tailcfg.Node // the desired peer set after the step
+	}{
+		{"initial", []*tailcfg.Node{peerA, peerB}},
+		{"rotate-A-key", []*tailcfg.Node{peerARotated, peerB}},
+		{"remove-B", []*tailcfg.Node{peerARotated}},
+		{"remove-all", nil},
+	}
+
+	// seedDERPState populates the node-key-keyed DERP maps for each
+	// current peer, as receiving DERP traffic from them would.
+	seedDERPState := func(c *Conn) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, n := range c.peersByID {
+			mak.Set(&c.derpRoute, n.Key(), derpRoute{regionID: 1})
+			mak.Set(&c.peerLastDerp, n.Key(), 1)
+		}
+	}
+
+	// derpKeys returns a canonical dump of the node-key-keyed DERP
+	// state that peer removals and key rotations must clean up.
+	derpKeys := func(c *Conn) []string {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		var got []string
+		for k := range c.derpRoute {
+			got = append(got, "derpRoute "+k.String())
+		}
+		for k := range c.peerLastDerp {
+			got = append(got, "peerLastDerp "+k.String())
+		}
+		slices.Sort(got)
+		return got
+	}
+
+	// stateString returns a canonical dump of all the per-peer state
+	// that the two update paths must maintain identically.
+	stateString := func(c *Conn) string {
+		c.mu.Lock()
+		lines := []string{fmt.Sprintf("peerMap %d", c.peerMap.nodeCount())}
+		for id, n := range c.peersByID {
+			lines = append(lines, fmt.Sprintf("peer %d %s", id, n.Key()))
+		}
+		c.mu.Unlock()
+		lines = append(lines, derpKeys(c)...)
+		slices.Sort(lines)
+		return strings.Join(lines, "\n")
+	}
+
+	connFull := newTestConn(t) // updated via SetNetworkMap
+	defer connFull.Close()
+	connInc := newTestConn(t) // updated via UpsertPeer/RemovePeer
+	defer connInc.Close()
+
+	prevKeyByID := map[tailcfg.NodeID]key.NodePublic{}
+	for _, step := range steps {
+		connFull.SetNetworkMap(tailcfg.NodeView{}, nodeViews(step.peers))
+
+		curIDs := set.Set[tailcfg.NodeID]{}
+		for _, n := range step.peers {
+			curIDs.Add(n.ID)
+			connInc.UpsertPeer(n.View())
+		}
+		for id := range prevKeyByID {
+			if !curIDs.Contains(id) {
+				connInc.RemovePeer(id)
+			}
+		}
+
+		// The DERP state seeded before this step must survive only for
+		// peers still present with an unchanged node key.
+		var want []string
+		for _, n := range step.peers {
+			if k, ok := prevKeyByID[n.ID]; ok && k == n.Key {
+				want = append(want, "derpRoute "+n.Key.String(), "peerLastDerp "+n.Key.String())
+			}
+		}
+		slices.Sort(want)
+		if got := derpKeys(connFull); !slices.Equal(got, want) {
+			t.Errorf("step %q: SetNetworkMap path DERP state = %q; want %q", step.name, got, want)
+		}
+
+		// Both update paths must have produced identical state.
+		if full, inc := stateString(connFull), stateString(connInc); full != inc {
+			t.Errorf("step %q: state mismatch between update paths\nSetNetworkMap path:\n%s\nUpsertPeer/RemovePeer path:\n%s", step.name, full, inc)
+		}
+
+		clear(prevKeyByID)
+		for _, n := range step.peers {
+			prevKeyByID[n.ID] = n.Key
+		}
+		seedDERPState(connFull)
+		seedDERPState(connInc)
 	}
 }
 

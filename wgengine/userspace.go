@@ -970,7 +970,6 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 
 	e.lastCfgFull = *cfg.Clone()
 
-	e.magicConn.UpdatePeers(peerSet)
 	e.magicConn.SetPreferredPort(listenPort)
 	e.magicConn.UpdatePMTUD()
 
