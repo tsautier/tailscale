@@ -1,7 +1,7 @@
 // Copyright (c) Tailscale Inc & contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type SliceContainer,InterfaceContainer,MapWithPointers,DeeplyNestedMap,NamedMapContainer,MapSlicePointerContainer
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type SliceContainer,InterfaceContainer,MapWithPointers,DeeplyNestedMap,NamedMapContainer,MapSlicePointerContainer,MapWithNamedSliceValues
 
 // Package clonerex is an example package for the cloner tool.
 package clonerex
@@ -72,3 +72,12 @@ type DeeplyNestedMap struct {
 	ThreeLevels map[string]map[string]map[string]int
 	FourLevels  map[string]map[string]map[string]map[string]*SliceContainer
 }
+
+// MapWithNamedSliceValues has a map with a named slice type for values. This
+// tests that the generator treats these values like any other slice and not a
+// struct.
+type MapWithNamedSliceValues struct {
+	M map[string]NamedSlice
+}
+
+type NamedSlice []string
